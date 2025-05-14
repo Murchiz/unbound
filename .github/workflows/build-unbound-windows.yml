@@ -1,44 +1,26 @@
 name: Build Unbound for Windows (Latest Release)
 
 on:
-  push:
-    branches: [ main ] # Or your default branch
-  pull_request:
-    branches: [ main ] # Or your default branch
   workflow_dispatch: # Allows manual triggering
+  # push: # Optional: trigger on pushes to a specific branch
+  #   branches: [ main ]
 
 jobs:
-  build-windows:
+  build-windows-release:
     runs-on: windows-latest
-    strategy:
-      matrix:
-        # You might want to specify OpenSSL versions if Unbound has specific requirements
-        # openssl_version: ['1.1.1', '3.0'] # Example
-        arch: [x64] # Add x86 if needed and supported by your build process
+
+    env:
+      # Define versions here for easier updates, matching the official workflow
+      OPENSSL_VERSION_NUMBER: "3.2.0"
+      OPENSSL_DIR_NAME: "openssl-3.2.0" # Directory name after extraction
+      OPENSSL_TARBALL: "openssl-3.2.0.tar.gz"
+      OPENSSL_DOWNLOAD_URL: "https://www.openssl.org/source/openssl-3.2.0.tar.gz"
+
+      LIBEXPAT_DIR_NAME: "expat-2.7.0"        # Directory name after extraction (from official LIBEXPAT_FNAME)
+      LIBEXPAT_VERSION_TAG_DIR: "R_2_7_0"   # Tag directory for download (from official LIBEXPAT_VERSION_DIR)
+      LIBEXPAT_TARBALL: "expat-2.7.0.tar.gz"  # LIBEXPAT_FNAME + .tar.gz
 
     steps:
-    - name: Checkout code (for workflow files)
-      uses: actions/checkout@v4
-
-    - name: Set up MSVC developer command prompt
-      uses: ilammy/msvc-dev-cmd@v1
-      with:
-        arch: ${{ matrix.arch }}
-
-    - name: Install Chocolatey (Package Manager)
-      uses: crazy-max/ghaction-chocolatey@v3
-      with:
-        args: '' # No specific packages to install via action args initially
-
-    - name: Install Dependencies via Chocolatey
-      run: |
-        choco install -y openssl.light # Or full openssl if needed. Check Unbound docs.
-        # choco install -y expat # If expat is required and not bundled or handled by OpenSSL
-        # choco install -y strawberryperl # If perl is needed for configure scripts
-        # choco install -y flex bison # If lex/yacc tools are needed for compilation from source
-      # Note: For OpenSSL, ensure the installed version is compatible and its headers/libs are findable.
-      # You might need to set environment variables like OPENSSL_ROOT_DIR or include paths.
-
     - name: Fetch Latest Unbound Release Tag
       id: get_latest_release
       uses: pozetroninc/github-action-get-latest-release@master
@@ -50,119 +32,132 @@ jobs:
       run: echo "Latest Unbound release is ${{ steps.get_latest_release.outputs.release }}"
 
     - name: Download and Extract Latest Unbound Release Source
-      shell: pwsh
+      shell: pwsh # PowerShell for initial setup and download
       run: |
         $LatestTag = "${{ steps.get_latest_release.outputs.release }}"
-        $TarballName = "unbound-$($LatestTag.Replace('release-', '')).tar.gz" # Assuming 'release-X.Y.Z' tag format
+        # GitHub archives from tags are typically named <tag>.tar.gz or <tag>.zip
+        # The directory inside the tarball is often <repo>-<tag> or <repo>-<stripped-tag>
+        $TarballFileName = "$LatestTag.tar.gz"
         $DownloadUrl = "https://github.com/NLnetLabs/unbound/archive/refs/tags/$LatestTag.tar.gz"
-        # Alternative direct download from NLnet Labs if available and preferred
-        # $DownloadUrl = "https://nlnetlabs.nl/downloads/unbound/unbound-${{ steps.get_latest_release.outputs.release }}.tar.gz"
+
         Write-Host "Downloading Unbound version $LatestTag from $DownloadUrl"
-        Invoke-WebRequest -Uri $DownloadUrl -OutFile unbound-latest.tar.gz
-        tar -xzf unbound-latest.tar.gz
-        # The extracted folder name might vary (e.g., unbound-1.23.0). We need to find it.
+        Invoke-WebRequest -Uri $DownloadUrl -OutFile unbound-release.tar.gz
+        tar -xzf unbound-release.tar.gz
+
+        # Find the extracted folder name (e.g., unbound-release-1.20.0)
         $ExtractedFolderName = (Get-ChildItem -Directory -Filter "unbound-*" | Select-Object -First 1).Name
         if (-not $ExtractedFolderName) {
           Write-Error "Could not find extracted Unbound folder."
           exit 1
         }
-        Move-Item -Path "$ExtractedFolderName" -Destination "unbound-src"
-        Set-Location "unbound-src"
-        Write-Host "Successfully downloaded and extracted Unbound to $(Get-Location)"
+        Move-Item -Path $ExtractedFolderName -Destination "unbound-src"
+        Write-Host "Successfully downloaded and extracted Unbound to $(Get-Location)\unbound-src"
 
-    - name: Configure Unbound Build
-      shell: cmd
-      working-directory: ./unbound-src
+        # Set PREPATH for subsequent bash steps. It will be the GitHub Workspace root.
+        echo "PREPATH=$((Resolve-Path .).Path.Replace('\', '/'))" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+    - name: Install Tools and Build Dependencies
+      shell: bash # Crucial for ./configure and make scripts used by OpenSSL, Expat, and Unbound
+      env:
+        # PREPATH is set from the previous PowerShell step and available here
+        LEX: "win_flex"
+        YACC: "win_bison -y"
       run: |
-        REM Adjust configure options as needed. Consult Unbound documentation for Windows.
-        REM This assumes configure script can run in cmd or you might need to use bash (e.g., from Git)
-        REM For MSVC, often a specific .mak file or solution is used, or configure generates one.
-        REM The configure script might need adjustments or a Windows-specific batch file might exist.
+        echo "PREPATH (Workspace) is: $PREPATH"
 
-        REM Example if using configure with OpenSSL paths (adjust paths as per Chocolatey installation):
-        REM For OpenSSL 3.x installed by Chocolatey, paths might be C:\Program Files\OpenSSL-Win64
-        SET OPENSSL_ROOT_DIR=C:\Progra~1\OpenSSL-Win64
-        IF NOT EXIST "%OPENSSL_ROOT_DIR%\include\openssl\ssl.h" (
-          SET OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL
-          IF NOT EXIST "%OPENSSL_ROOT_DIR%\include\openssl\ssl.h" (
-             SET OPENSSL_ROOT_DIR=C:\ProgramData\chocolatey\lib\OpenSSL.Light\tools\OpenSSL-Win64
-          )
-        )
-        ECHO Using OPENSSL_ROOT_DIR: %OPENSSL_ROOT_DIR%
+        echo "Installing winflexbison3..."
+        choco install winflexbison3 --no-progress -y
 
-        REM Check if configure script exists. If not, Unbound might use a different system for Windows (e.g. CMake, solution file).
-        IF EXIST configure (
-          sh configure --with-ssl="%OPENSSL_ROOT_DIR%" --with-libexpat="C:/ProgramData/chocolatey/lib/expat/tools" --enable-static-exe --enable-fully-static
-          REM Add other flags as needed, e.g., --prefix for install location
-        ) ELSE IF EXIST Makefile.mvc (
-          ECHO Found Makefile.mvc, will use nmake.
-          REM You might need to set INCLUDE and LIB environment variables here if not done by msvc-dev-cmd
-          SET INCLUDE=%INCLUDE%;%OPENSSL_ROOT_DIR%\include
-          SET LIB=%LIB%;%OPENSSL_ROOT_DIR%\lib
-          REM Check if expat is needed and add its paths
-        ) ELSE (
-          ECHO "No standard configure script or Makefile.mvc found. Check Unbound's Windows build instructions."
-          EXIT /B 1
-        )
+        echo "Building OpenSSL..."
+        cd "$PREPATH" # Ensure we are in the workspace root
+        mkdir -p openssl_build_dir # Directory to download and build OpenSSL
+        cd openssl_build_dir
+        curl -L -k -s -S -o "${{ env.OPENSSL_TARBALL }}" "${{ env.OPENSSL_DOWNLOAD_URL }}"
+        tar xzf "${{ env.OPENSSL_TARBALL }}"
+        cd "${{ env.OPENSSL_DIR_NAME }}" # e.g., openssl-3.2.0
 
-    - name: Compile Unbound
-      shell: cmd
-      working-directory: ./unbound-src
+        OPENSSL_INSTALL_PATH="$PREPATH/openssl_install"
+        echo "Configuring OpenSSL to install into $OPENSSL_INSTALL_PATH"
+        # Using Perl from Git for Windows, which is usually available on GitHub runners
+        # The official workflow uses C:/msys64/usr/bin/perl. If that path is more reliable on the specific runner, adjust.
+        # PERL="C:/Program Files/Git/usr/bin/perl.exe" also works for the Configure script.
+        "C:/Program Files/Git/usr/bin/perl.exe" ./Configure no-shared no-asm -DOPENSSL_NO_CAPIENG mingw64 --prefix="$OPENSSL_INSTALL_PATH" --openssldir="$OPENSSL_INSTALL_PATH" PERL="C:/Program Files/Git/usr/bin/perl.exe"
+
+        echo "Making OpenSSL (build_libs)..."
+        make build_libs # Faster, as in official workflow
+        echo "Installing OpenSSL (install_dev)..."
+        make install_dev # Installs headers and libs, as in official workflow
+
+        echo "Building Expat..."
+        cd "$PREPATH" # Back to workspace root
+        mkdir -p expat_build_dir # Directory to download and build Expat
+        cd expat_build_dir
+        EXPAT_DOWNLOAD_URL="https://github.com/libexpat/libexpat/releases/download/${{ env.LIBEXPAT_VERSION_TAG_DIR }}/${{ env.LIBEXPAT_DIR_NAME }}.tar.gz"
+        curl -L -k -s -S -o "${{ env.LIBEXPAT_TARBALL }}" "$EXPAT_DOWNLOAD_URL"
+        tar xzf "${{ env.LIBEXPAT_TARBALL }}"
+        cd "${{ env.LIBEXPAT_DIR_NAME }}" # e.g., expat-2.7.0
+
+        EXPAT_INSTALL_PATH="$PREPATH/expat_install"
+        echo "Configuring Expat to install into $EXPAT_INSTALL_PATH"
+        # Using SHELL=/usr/bin/bash and CONFIG_SHELL=/usr/bin/bash as in official workflow for Expat's configure
+        ./configure SHELL=/usr/bin/bash CONFIG_SHELL=/usr/bin/bash --prefix="$EXPAT_INSTALL_PATH" --exec-prefix="$EXPAT_INSTALL_PATH" --bindir="$EXPAT_INSTALL_PATH/bin" --includedir="$EXPAT_INSTALL_PATH/include" --mandir="$EXPAT_INSTALL_PATH/man" --libdir="$EXPAT_INSTALL_PATH/lib"
+
+        echo "Fixing Expat Makefiles (SHELL -> SHELLZZ)..."
+        find . -name "Makefile" -exec sed -i 's/^SHELL\s*=/SHELLZZ =/g' {} \; # More robust sed for SHELL variable
+
+        echo "Making Expat..."
+        make
+        echo "Installing Expat..."
+        make install
+
+    - name: Configure and Build Unbound
+      shell: bash # Unbound's ./configure and make also expect a bash-like environment
+      env:
+        # PREPATH is from GITHUB_ENV
+        LEX: "win_flex"
+        YACC: "win_bison -y"
       run: |
-        REM If configure script was used and generated Makefiles for nmake:
-        IF EXIST Makefile (
-          nmake
-          REM nmake install # Optionally, if you want to "install" it to a staging directory
-        ) ELSE IF EXIST Makefile.mvc (
-          nmake -f Makefile.mvc
-          REM nmake -f Makefile.mvc install
-        ) ELSE (
-          ECHO "Cannot determine build method. No Makefile or Makefile.mvc found."
-          EXIT /B 1
-        )
+        echo "Configuring Unbound from $PREPATH/unbound-src..."
+        cd "$PREPATH/unbound-src" # Navigate into the downloaded Unbound source directory
 
-    - name: List Build Output
-      shell: pwsh
-      working-directory: ./unbound-src
-      run: |
-        Get-ChildItem . -Recurse -Include unbound.exe, unbound-checkconf.exe, unbound-anchor.exe, libunbound.dll, *.pdb | Select-Object FullName
-        # Adjust based on actual output files and locations
+        # Paths for --with-ssl and --with-libexpat must point to our custom install locations
+        OPENSSL_INSTALL_PATH_UNIX=$(echo "$PREPATH/openssl_install" | sed 's/\\/\//g')
+        EXPAT_INSTALL_PATH_UNIX=$(echo "$PREPATH/expat_install" | sed 's/\\/\//g')
 
-    - name: Create Release Artifacts Directory
+        echo "Using OpenSSL from: $OPENSSL_INSTALL_PATH_UNIX"
+        echo "Using Expat from: $EXPAT_INSTALL_PATH_UNIX"
+
+        # Configure Unbound using flags from the official workflow
+        ./configure --enable-debug --enable-static-exe --disable-flto "--with-ssl=$OPENSSL_INSTALL_PATH_UNIX" "--with-libexpat=$EXPAT_INSTALL_PATH_UNIX" --disable-shared
+
+        echo "Making Unbound..."
+        make
+
+        echo "Running Unbound tests (optional)..."
+        make test
+
+    - name: Prepare Artifacts
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Force -Path staging
+        $SourceDir = "${{ env.PREPATH }}/unbound-src" # PREPATH is available as an env var
+        Write-Host "Looking for binaries in $SourceDir"
 
-    - name: Copy Binaries to Staging Directory
-      shell: pwsh
-      working-directory: ./unbound-src
-      run: |
-        # Adjust paths and filenames based on where the build process outputs the files
-        # Common locations might be the root of unbound-src, or a 'bin' or 'Release' subdirectory
-        $Binaries = @(
-            "unbound.exe",
-            "unbound-checkconf.exe",
-            "unbound-anchor.exe",
-            "libunbound.dll" # If a DLL is produced
-            # Add .pdb files if you want to archive debug symbols
-        )
-        foreach ($binary in $Binaries) {
-            $foundFiles = Get-ChildItem . -Recurse -Filter $binary -ErrorAction SilentlyContinue
-            if ($foundFiles) {
-                $foundFiles | Copy-Item -Destination ../staging -Force
-                Write-Host "Copied $($foundFiles.FullName) to staging"
-            } else {
-                Write-Warning "Could not find $binary in the build output."
-            }
-        }
-        # Copy license and example config if desired
-        if (Test-Path "LICENSE") { Copy-Item "LICENSE" -Destination "../staging" }
-        if (Test-Path "doc/example.conf") { Copy-Item "doc/example.conf" -Destination "../staging" }
+        Copy-Item -Path "$SourceDir/unbound.exe" -Destination "./staging/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "$SourceDir/unbound-checkconf.exe" -Destination "./staging/" -ErrorAction SilentlyContinue
+        Copy-Item -Path "$SourceDir/unbound-anchor.exe" -Destination "./staging/" -ErrorAction SilentlyContinue
+        # libunbound.dll is not expected with --disable-shared and --enable-static-exe
 
+        # Copy LICENSE and example config if they exist in the source root
+        if (Test-Path "$SourceDir/LICENSE") { Copy-Item "$SourceDir/LICENSE" -Destination "./staging/" }
+        if (Test-Path "$SourceDir/doc/example.conf") { Copy-Item "$SourceDir/doc/example.conf" -Destination "./staging/" }
+
+        Write-Host "Staging directory content:"
+        Get-ChildItem ./staging
 
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: unbound-windows-${{ matrix.arch }}-${{ steps.get_latest_release.outputs.release }}
+        name: unbound-windows-${{ steps.get_latest_release.outputs.release }}
         path: staging/
-        if-no-files-found: error # Fails the workflow if no files are found to upload
+        if-no-files-found: error # Fails the workflow if no binaries were copied
