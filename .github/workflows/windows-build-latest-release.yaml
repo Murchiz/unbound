@@ -12,18 +12,22 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
-            const response = await github.rest.repos.getLatestRelease({
-              owner: 'NLnetLabs',
-              repo: 'unbound',
-            });
-            const tag_name = response.data.tag_name;
-            core.setOutput('tag_name', tag_name);
-      - name: Checkout repository at latest release tag
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.latest_release.outputs.tag_name }}
-          submodules: false
-          persist-credentials: false
+            try {
+              const response = await github.rest.repos.getLatestRelease({
+                owner: 'NLnetLabs',
+                repo: 'unbound',
+              });
+              const tag_name = response.data.tag_name;
+              core.setOutput('tag_name', tag_name);
+            } catch (error) {
+              core.setFailed(`Failed to get latest release: ${error.message}`);
+            }
+      - name: Echo latest release tag
+        run: echo "Latest release tag is ${{ steps.latest_release.outputs.tag_name }}"
+      - name: Fetch latest release tag
+        run: git fetch origin tag ${{ steps.latest_release.outputs.tag_name }} --no-tags
+      - name: Checkout latest release tag
+        run: git checkout ${{ steps.latest_release.outputs.tag_name }}
       - name: Set up build environment
         shell: bash
         run: |
