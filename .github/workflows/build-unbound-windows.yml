@@ -10,15 +10,14 @@ jobs:
     runs-on: windows-latest
 
     env:
-      # Define versions here for easier updates, matching the official workflow
       OPENSSL_VERSION_NUMBER: "3.2.0"
-      OPENSSL_DIR_NAME: "openssl-3.2.0" # Directory name after extraction
+      OPENSSL_DIR_NAME: "openssl-3.2.0"
       OPENSSL_TARBALL: "openssl-3.2.0.tar.gz"
       OPENSSL_DOWNLOAD_URL: "https://www.openssl.org/source/openssl-3.2.0.tar.gz"
 
-      LIBEXPAT_DIR_NAME: "expat-2.7.0"        # Directory name after extraction (from official LIBEXPAT_FNAME)
-      LIBEXPAT_VERSION_TAG_DIR: "R_2_7_0"   # Tag directory for download (from official LIBEXPAT_VERSION_DIR)
-      LIBEXPAT_TARBALL: "expat-2.7.0.tar.gz"  # LIBEXPAT_FNAME + .tar.gz
+      LIBEXPAT_DIR_NAME: "expat-2.7.0"
+      LIBEXPAT_VERSION_TAG_DIR: "R_2_7_0"
+      LIBEXPAT_TARBALL: "expat-2.7.0.tar.gz"
 
     steps:
     - name: Fetch Latest Unbound Release Tag
@@ -26,17 +25,15 @@ jobs:
       uses: pozetroninc/github-action-get-latest-release@master
       with:
         repository: NLnetLabs/unbound
-        excludes: prerelease, draft # Ensure we get stable releases
+        excludes: prerelease, draft
 
     - name: Display Latest Release Tag
       run: echo "Latest Unbound release is ${{ steps.get_latest_release.outputs.release }}"
 
     - name: Download and Extract Latest Unbound Release Source
-      shell: pwsh # PowerShell for initial setup and download
+      shell: pwsh
       run: |
         $LatestTag = "${{ steps.get_latest_release.outputs.release }}"
-        # GitHub archives from tags are typically named <tag>.tar.gz or <tag>.zip
-        # The directory inside the tarball is often <repo>-<tag> or <repo>-<stripped-tag>
         $TarballFileName = "$LatestTag.tar.gz"
         $DownloadUrl = "https://github.com/NLnetLabs/unbound/archive/refs/tags/$LatestTag.tar.gz"
 
@@ -44,7 +41,6 @@ jobs:
         Invoke-WebRequest -Uri $DownloadUrl -OutFile unbound-release.tar.gz
         tar -xzf unbound-release.tar.gz
 
-        # Find the extracted folder name (e.g., unbound-release-1.20.0)
         $ExtractedFolderName = (Get-ChildItem -Directory -Filter "unbound-*" | Select-Object -First 1).Name
         if (-not $ExtractedFolderName) {
           Write-Error "Could not find extracted Unbound folder."
@@ -53,57 +49,65 @@ jobs:
         Move-Item -Path $ExtractedFolderName -Destination "unbound-src"
         Write-Host "Successfully downloaded and extracted Unbound to $(Get-Location)\unbound-src"
 
-        # Set PREPATH for subsequent bash steps. It will be the GitHub Workspace root.
-        echo "PREPATH=$((Resolve-Path .).Path.Replace('\', '/'))" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        # Set GITHUB_WORKSPACE_UNIX_STYLE for use in bash steps. PREPATH_WINDOWS for Windows specific commands if needed.
+        $WorkspacePath = (Resolve-Path .).Path
+        $UnixStyleWorkspacePath = $WorkspacePath -replace '\\', '/' -replace '^([A-Za-z]):', '/$1'.ToLower()
+        echo "PREPATH_WINDOWS=$WorkspacePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        echo "PREPATH_UNIX=$UnixStyleWorkspacePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        Write-Host "PREPATH_UNIX (for bash) = $UnixStyleWorkspacePath"
+        Write-Host "PREPATH_WINDOWS (for powershell/cmd) = $WorkspacePath"
 
     - name: Install Tools and Build Dependencies
-      shell: bash # Crucial for ./configure and make scripts used by OpenSSL, Expat, and Unbound
+      shell: bash
       env:
-        # PREPATH is set from the previous PowerShell step and available here
         LEX: "win_flex"
         YACC: "win_bison -y"
+        # PREPATH_UNIX and PREPATH_WINDOWS are available from GITHUB_ENV
       run: |
-        echo "PREPATH (Workspace) is: $PREPATH"
+        echo "PREPATH_UNIX (Workspace for bash) is: $PREPATH_UNIX"
+        echo "PREPATH_WINDOWS (Workspace for Windows) is: $PREPATH_WINDOWS"
 
         echo "Installing winflexbison3..."
         choco install winflexbison3 --no-progress -y
 
         echo "Building OpenSSL..."
-        cd "$PREPATH" # Ensure we are in the workspace root
-        mkdir -p openssl_build_dir # Directory to download and build OpenSSL
+        cd "$PREPATH_UNIX" # Ensure we are in the workspace root using Unix-style path for bash
+        mkdir -p openssl_build_dir
         cd openssl_build_dir
         curl -L -k -s -S -o "${{ env.OPENSSL_TARBALL }}" "${{ env.OPENSSL_DOWNLOAD_URL }}"
         tar xzf "${{ env.OPENSSL_TARBALL }}"
-        cd "${{ env.OPENSSL_DIR_NAME }}" # e.g., openssl-3.2.0
+        cd "${{ env.OPENSSL_DIR_NAME }}"
 
-        OPENSSL_INSTALL_PATH="$PREPATH/openssl_install"
-        echo "Configuring OpenSSL to install into $OPENSSL_INSTALL_PATH"
-        # Using Perl from Git for Windows, which is usually available on GitHub runners
-        # The official workflow uses C:/msys64/usr/bin/perl. If that path is more reliable on the specific runner, adjust.
-        # PERL="C:/Program Files/Git/usr/bin/perl.exe" also works for the Configure script.
-        "C:/Program Files/Git/usr/bin/perl.exe" ./Configure no-shared no-asm -DOPENSSL_NO_CAPIENG mingw64 --prefix="$OPENSSL_INSTALL_PATH" --openssldir="$OPENSSL_INSTALL_PATH" PERL="C:/Program Files/Git/usr/bin/perl.exe"
+        OPENSSL_INSTALL_PATH_UNIX="$PREPATH_UNIX/openssl_install"
+        echo "Configuring OpenSSL. Install path: $OPENSSL_INSTALL_PATH_UNIX. Perl: /usr/bin/perl"
+        
+        # Use MSYS2's Perl (/usr/bin/perl within bash) and provide Unix-style paths to Configure
+        # The PERL variable within Configure script also needs to point to the MSYS2 perl
+        /usr/bin/perl ./Configure no-shared no-asm -DOPENSSL_NO_CAPIENG mingw64 \
+            --prefix="$OPENSSL_INSTALL_PATH_UNIX" \
+            --openssldir="$OPENSSL_INSTALL_PATH_UNIX" \
+            PERL="/usr/bin/perl"
 
         echo "Making OpenSSL (build_libs)..."
-        make build_libs # Faster, as in official workflow
+        make build_libs
         echo "Installing OpenSSL (install_dev)..."
-        make install_dev # Installs headers and libs, as in official workflow
+        make install_dev
 
         echo "Building Expat..."
-        cd "$PREPATH" # Back to workspace root
-        mkdir -p expat_build_dir # Directory to download and build Expat
+        cd "$PREPATH_UNIX" # Back to workspace root
+        mkdir -p expat_build_dir
         cd expat_build_dir
         EXPAT_DOWNLOAD_URL="https://github.com/libexpat/libexpat/releases/download/${{ env.LIBEXPAT_VERSION_TAG_DIR }}/${{ env.LIBEXPAT_DIR_NAME }}.tar.gz"
         curl -L -k -s -S -o "${{ env.LIBEXPAT_TARBALL }}" "$EXPAT_DOWNLOAD_URL"
         tar xzf "${{ env.LIBEXPAT_TARBALL }}"
-        cd "${{ env.LIBEXPAT_DIR_NAME }}" # e.g., expat-2.7.0
+        cd "${{ env.LIBEXPAT_DIR_NAME }}"
 
-        EXPAT_INSTALL_PATH="$PREPATH/expat_install"
-        echo "Configuring Expat to install into $EXPAT_INSTALL_PATH"
-        # Using SHELL=/usr/bin/bash and CONFIG_SHELL=/usr/bin/bash as in official workflow for Expat's configure
-        ./configure SHELL=/usr/bin/bash CONFIG_SHELL=/usr/bin/bash --prefix="$EXPAT_INSTALL_PATH" --exec-prefix="$EXPAT_INSTALL_PATH" --bindir="$EXPAT_INSTALL_PATH/bin" --includedir="$EXPAT_INSTALL_PATH/include" --mandir="$EXPAT_INSTALL_PATH/man" --libdir="$EXPAT_INSTALL_PATH/lib"
+        EXPAT_INSTALL_PATH_UNIX="$PREPATH_UNIX/expat_install"
+        echo "Configuring Expat to install into $EXPAT_INSTALL_PATH_UNIX"
+        ./configure SHELL=/usr/bin/bash CONFIG_SHELL=/usr/bin/bash --prefix="$EXPAT_INSTALL_PATH_UNIX" --exec-prefix="$EXPAT_INSTALL_PATH_UNIX" --bindir="$EXPAT_INSTALL_PATH_UNIX/bin" --includedir="$EXPAT_INSTALL_PATH_UNIX/include" --mandir="$EXPAT_INSTALL_PATH_UNIX/man" --libdir="$EXPAT_INSTALL_PATH_UNIX/lib"
 
         echo "Fixing Expat Makefiles (SHELL -> SHELLZZ)..."
-        find . -name "Makefile" -exec sed -i 's/^SHELL\s*=/SHELLZZ =/g' {} \; # More robust sed for SHELL variable
+        find . -name "Makefile" -exec sed -i 's/^SHELL\s*=/SHELLZZ =/g' {} \;
 
         echo "Making Expat..."
         make
@@ -111,24 +115,25 @@ jobs:
         make install
 
     - name: Configure and Build Unbound
-      shell: bash # Unbound's ./configure and make also expect a bash-like environment
+      shell: bash
       env:
-        # PREPATH is from GITHUB_ENV
         LEX: "win_flex"
         YACC: "win_bison -y"
+        # PREPATH_UNIX and PREPATH_WINDOWS are available from GITHUB_ENV
       run: |
-        echo "Configuring Unbound from $PREPATH/unbound-src..."
-        cd "$PREPATH/unbound-src" # Navigate into the downloaded Unbound source directory
+        echo "Configuring Unbound from $PREPATH_UNIX/unbound-src..."
+        cd "$PREPATH_UNIX/unbound-src"
 
-        # Paths for --with-ssl and --with-libexpat must point to our custom install locations
-        OPENSSL_INSTALL_PATH_UNIX=$(echo "$PREPATH/openssl_install" | sed 's/\\/\//g')
-        EXPAT_INSTALL_PATH_UNIX=$(echo "$PREPATH/expat_install" | sed 's/\\/\//g')
+        OPENSSL_INSTALL_PATH_UNIX_FOR_UNBOUND="$PREPATH_UNIX/openssl_install"
+        EXPAT_INSTALL_PATH_UNIX_FOR_UNBOUND="$PREPATH_UNIX/expat_install"
 
-        echo "Using OpenSSL from: $OPENSSL_INSTALL_PATH_UNIX"
-        echo "Using Expat from: $EXPAT_INSTALL_PATH_UNIX"
+        echo "Using OpenSSL from: $OPENSSL_INSTALL_PATH_UNIX_FOR_UNBOUND"
+        echo "Using Expat from: $EXPAT_INSTALL_PATH_UNIX_FOR_UNBOUND"
 
-        # Configure Unbound using flags from the official workflow
-        ./configure --enable-debug --enable-static-exe --disable-flto "--with-ssl=$OPENSSL_INSTALL_PATH_UNIX" "--with-libexpat=$EXPAT_INSTALL_PATH_UNIX" --disable-shared
+        ./configure --enable-debug --enable-static-exe --disable-flto \
+            "--with-ssl=$OPENSSL_INSTALL_PATH_UNIX_FOR_UNBOUND" \
+            "--with-libexpat=$EXPAT_INSTALL_PATH_UNIX_FOR_UNBOUND" \
+            --disable-shared
 
         echo "Making Unbound..."
         make
@@ -138,19 +143,19 @@ jobs:
 
     - name: Prepare Artifacts
       shell: pwsh
+      env:
+        # PREPATH_WINDOWS is used here as PowerShell commands prefer Windows-style paths
       run: |
         New-Item -ItemType Directory -Force -Path staging
-        $SourceDir = "${{ env.PREPATH }}/unbound-src" # PREPATH is available as an env var
+        $SourceDir = Join-Path $env:PREPATH_WINDOWS "unbound-src" # Use Windows-style path for PowerShell
         Write-Host "Looking for binaries in $SourceDir"
 
-        Copy-Item -Path "$SourceDir/unbound.exe" -Destination "./staging/" -ErrorAction SilentlyContinue
-        Copy-Item -Path "$SourceDir/unbound-checkconf.exe" -Destination "./staging/" -ErrorAction SilentlyContinue
-        Copy-Item -Path "$SourceDir/unbound-anchor.exe" -Destination "./staging/" -ErrorAction SilentlyContinue
-        # libunbound.dll is not expected with --disable-shared and --enable-static-exe
-
-        # Copy LICENSE and example config if they exist in the source root
-        if (Test-Path "$SourceDir/LICENSE") { Copy-Item "$SourceDir/LICENSE" -Destination "./staging/" }
-        if (Test-Path "$SourceDir/doc/example.conf") { Copy-Item "$SourceDir/doc/example.conf" -Destination "./staging/" }
+        Copy-Item -Path (Join-Path $SourceDir "unbound.exe") -Destination "./staging/" -ErrorAction SilentlyContinue
+        Copy-Item -Path (Join-Path $SourceDir "unbound-checkconf.exe") -Destination "./staging/" -ErrorAction SilentlyContinue
+        Copy-Item -Path (Join-Path $SourceDir "unbound-anchor.exe") -Destination "./staging/" -ErrorAction SilentlyContinue
+        
+        if (Test-Path (Join-Path $SourceDir "LICENSE")) { Copy-Item (Join-Path $SourceDir "LICENSE") -Destination "./staging/" }
+        if (Test-Path (Join-Path $SourceDir "doc/example.conf")) { Copy-Item (Join-Path $SourceDir "doc/example.conf") -Destination "./staging/" }
 
         Write-Host "Staging directory content:"
         Get-ChildItem ./staging
@@ -160,4 +165,4 @@ jobs:
       with:
         name: unbound-windows-${{ steps.get_latest_release.outputs.release }}
         path: staging/
-        if-no-files-found: error # Fails the workflow if no binaries were copied
+        if-no-files-found: error
