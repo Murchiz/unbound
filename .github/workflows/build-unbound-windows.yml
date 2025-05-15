@@ -2,8 +2,6 @@ name: Build Unbound for Windows (Latest Release)
 
 on:
   workflow_dispatch: # Allows manual triggering
-  # push: # Optional: trigger on pushes to a specific branch
-  #   branches: [ main ]
 
 jobs:
   build-windows-release:
@@ -49,29 +47,30 @@ jobs:
         Move-Item -Path $ExtractedFolderName -Destination "unbound-src"
         Write-Host "Successfully downloaded and extracted Unbound to $(Get-Location)\unbound-src"
 
-        # Set GITHUB_WORKSPACE_UNIX_STYLE for use in bash steps. PREPATH_WINDOWS for Windows specific commands if needed.
         $WorkspacePath = (Resolve-Path .).Path
         $UnixStyleWorkspacePath = $WorkspacePath -replace '\\', '/' -replace '^([A-Za-z]):', '/$1'.ToLower()
         echo "PREPATH_WINDOWS=$WorkspacePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         echo "PREPATH_UNIX=$UnixStyleWorkspacePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        Write-Host "PREPATH_UNIX (for bash) = $UnixStyleWorkspacePath"
+        Write-Host "PREPATH_UNIX (for msys2 bash) = $UnixStyleWorkspacePath"
         Write-Host "PREPATH_WINDOWS (for powershell/cmd) = $WorkspacePath"
 
-    - name: Install Tools and Build Dependencies
-      shell: bash
-      env:
-        LEX: "win_flex"
-        YACC: "win_bison -y"
-        # PREPATH_UNIX and PREPATH_WINDOWS are available from GITHUB_ENV
+    - name: Install Build Tools (Chocolatey)
+      shell: bash # or pwsh, choco should be in PATH
       run: |
-        echo "PREPATH_UNIX (Workspace for bash) is: $PREPATH_UNIX"
-        echo "PREPATH_WINDOWS (Workspace for Windows) is: $PREPATH_WINDOWS"
-
         echo "Installing winflexbison3..."
         choco install winflexbison3 --no-progress -y
 
+    - name: Build Dependencies and Unbound (MSYS2 environment)
+      shell: msys2 {0} # Use MSYS2 shell for these build steps
+      env:
+        LEX: "win_flex" # These might need to be win_flex.exe if not found
+        YACC: "win_bison -y"
+        # PREPATH_UNIX and PREPATH_WINDOWS are available from GITHUB_ENV
+      run: |
+        echo "Running in MSYS2 shell. PREPATH_UNIX is: $PREPATH_UNIX"
+
         echo "Building OpenSSL..."
-        cd "$PREPATH_UNIX" # Ensure we are in the workspace root using Unix-style path for bash
+        cd "$PREPATH_UNIX"
         mkdir -p openssl_build_dir
         cd openssl_build_dir
         curl -L -k -s -S -o "${{ env.OPENSSL_TARBALL }}" "${{ env.OPENSSL_DOWNLOAD_URL }}"
@@ -79,10 +78,10 @@ jobs:
         cd "${{ env.OPENSSL_DIR_NAME }}"
 
         OPENSSL_INSTALL_PATH_UNIX="$PREPATH_UNIX/openssl_install"
-        echo "Configuring OpenSSL. Install path: $OPENSSL_INSTALL_PATH_UNIX. Perl: /usr/bin/perl"
+        echo "Configuring OpenSSL. Install path: $OPENSSL_INSTALL_PATH_UNIX. Using /usr/bin/perl from MSYS2 PATH."
         
-        # Use MSYS2's Perl (/usr/bin/perl within bash) and provide Unix-style paths to Configure
-        # The PERL variable within Configure script also needs to point to the MSYS2 perl
+        # Within msys2 shell, /usr/bin/perl should be the MSYS2 Perl.
+        # Ensure paths for --prefix and --openssldir are Unix-style for the MSYS2 environment.
         /usr/bin/perl ./Configure no-shared no-asm -DOPENSSL_NO_CAPIENG mingw64 \
             --prefix="$OPENSSL_INSTALL_PATH_UNIX" \
             --openssldir="$OPENSSL_INSTALL_PATH_UNIX" \
@@ -94,7 +93,7 @@ jobs:
         make install_dev
 
         echo "Building Expat..."
-        cd "$PREPATH_UNIX" # Back to workspace root
+        cd "$PREPATH_UNIX"
         mkdir -p expat_build_dir
         cd expat_build_dir
         EXPAT_DOWNLOAD_URL="https://github.com/libexpat/libexpat/releases/download/${{ env.LIBEXPAT_VERSION_TAG_DIR }}/${{ env.LIBEXPAT_DIR_NAME }}.tar.gz"
@@ -104,7 +103,14 @@ jobs:
 
         EXPAT_INSTALL_PATH_UNIX="$PREPATH_UNIX/expat_install"
         echo "Configuring Expat to install into $EXPAT_INSTALL_PATH_UNIX"
-        ./configure SHELL=/usr/bin/bash CONFIG_SHELL=/usr/bin/bash --prefix="$EXPAT_INSTALL_PATH_UNIX" --exec-prefix="$EXPAT_INSTALL_PATH_UNIX" --bindir="$EXPAT_INSTALL_PATH_UNIX/bin" --includedir="$EXPAT_INSTALL_PATH_UNIX/include" --mandir="$EXPAT_INSTALL_PATH_UNIX/man" --libdir="$EXPAT_INSTALL_PATH_UNIX/lib"
+        # Expat's configure also expects a Unix-like environment
+        ./configure SHELL=/usr/bin/bash CONFIG_SHELL=/usr/bin/bash \
+            --prefix="$EXPAT_INSTALL_PATH_UNIX" \
+            --exec-prefix="$EXPAT_INSTALL_PATH_UNIX" \
+            --bindir="$EXPAT_INSTALL_PATH_UNIX/bin" \
+            --includedir="$EXPAT_INSTALL_PATH_UNIX/include" \
+            --mandir="$EXPAT_INSTALL_PATH_UNIX/man" \
+            --libdir="$EXPAT_INSTALL_PATH_UNIX/lib"
 
         echo "Fixing Expat Makefiles (SHELL -> SHELLZZ)..."
         find . -name "Makefile" -exec sed -i 's/^SHELL\s*=/SHELLZZ =/g' {} \;
@@ -114,13 +120,6 @@ jobs:
         echo "Installing Expat..."
         make install
 
-    - name: Configure and Build Unbound
-      shell: bash
-      env:
-        LEX: "win_flex"
-        YACC: "win_bison -y"
-        # PREPATH_UNIX and PREPATH_WINDOWS are available from GITHUB_ENV
-      run: |
         echo "Configuring Unbound from $PREPATH_UNIX/unbound-src..."
         cd "$PREPATH_UNIX/unbound-src"
 
@@ -130,7 +129,13 @@ jobs:
         echo "Using OpenSSL from: $OPENSSL_INSTALL_PATH_UNIX_FOR_UNBOUND"
         echo "Using Expat from: $EXPAT_INSTALL_PATH_UNIX_FOR_UNBOUND"
 
-        ./configure --enable-debug --enable-static-exe --disable-flto \
+        # Ensure LEX and YACC point to the correct executables.
+        # The choco package winflexbison3 installs them as win_flex.exe and win_bison.exe
+        # These might need to be on the MSYS2 path or called with .exe
+        # Let's try with explicit .exe for LEX and YACC
+        # Or ensure C:\ProgramData\chocolatey\bin is in MSYS2's $PATH (it usually is)
+        ./configure LEX="win_flex.exe" YACC="win_bison.exe -y" \
+            --enable-debug --enable-static-exe --disable-flto \
             "--with-ssl=$OPENSSL_INSTALL_PATH_UNIX_FOR_UNBOUND" \
             "--with-libexpat=$EXPAT_INSTALL_PATH_UNIX_FOR_UNBOUND" \
             --disable-shared
@@ -142,10 +147,12 @@ jobs:
         make test
 
     - name: Prepare Artifacts
-      shell: pwsh 
+      shell: pwsh
+      env:
+        # PREPATH_WINDOWS is used here
       run: |
         New-Item -ItemType Directory -Force -Path staging
-        $SourceDir = Join-Path $env:PREPATH_WINDOWS "unbound-src" # Use Windows-style path for PowerShell
+        $SourceDir = Join-Path $env:PREPATH_WINDOWS "unbound-src"
         Write-Host "Looking for binaries in $SourceDir"
 
         Copy-Item -Path (Join-Path $SourceDir "unbound.exe") -Destination "./staging/" -ErrorAction SilentlyContinue
