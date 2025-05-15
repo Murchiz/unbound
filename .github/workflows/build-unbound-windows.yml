@@ -142,9 +142,7 @@ jobs:
         make test
 
     - name: Prepare Artifacts
-      shell: pwsh
-      env:
-        # PREPATH_WINDOWS is used here as PowerShell commands prefer Windows-style paths
+      shell: pwsh 
       run: |
         New-Item -ItemType Directory -Force -Path staging
         $SourceDir = Join-Path $env:PREPATH_WINDOWS "unbound-src" # Use Windows-style path for PowerShell
