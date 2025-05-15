@@ -147,8 +147,7 @@ jobs:
         make test
 
     - name: Prepare Artifacts
-      shell: pwsh
-      env:
+      shell: pwsh 
         # PREPATH_WINDOWS is used here
       run: |
         New-Item -ItemType Directory -Force -Path staging
