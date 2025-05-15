@@ -1,172 +1,79 @@
 name: Build Unbound for Windows (Latest Release)
 
 on:
-  workflow_dispatch: # Allows manual triggering
+  workflow_dispatch:  # Manual trigger
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly check for new releases
 
 jobs:
-  build-windows-release:
+  build:
     runs-on: windows-latest
-
     env:
-      OPENSSL_VERSION_NUMBER: "3.2.0"
-      OPENSSL_DIR_NAME: "openssl-3.2.0"
-      OPENSSL_TARBALL: "openssl-3.2.0.tar.gz"
-      OPENSSL_DOWNLOAD_URL: "https://www.openssl.org/source/openssl-3.2.0.tar.gz"
-
-      LIBEXPAT_DIR_NAME: "expat-2.7.0"
-      LIBEXPAT_VERSION_TAG_DIR: "R_2_7_0"
-      LIBEXPAT_TARBALL: "expat-2.7.0.tar.gz"
-
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-    - name: Fetch Latest Unbound Release Tag
-      id: get_latest_release
-      uses: pozetroninc/github-action-get-latest-release@master
-      with:
-        repository: NLnetLabs/unbound
-        excludes: prerelease, draft
+      - name: Fetch latest release tarball URL
+        id: get-release
+        run: |
+          $url = "https://api.github.com/repos/NLnetLabs/unbound/releases/latest "
+          $response = Invoke-RestMethod -Uri $url -Headers @{"Authorization"="Bearer $env:GITHUB_TOKEN"}
+          $tarballUrl = $response.tarball_url
+          $version = $response.tag_name
+          echo "TARBALL_URL=$tarballUrl" >> $env:GITHUB_ENV
+          echo "VERSION=$version" >> $env:GITHUB_ENV
 
-    - name: Display Latest Release Tag
-      run: echo "Latest Unbound release is ${{ steps.get_latest_release.outputs.release }}"
+      - name: Download and extract tarball
+        run: |
+          $dest = "$env:GITHUB_WORKSPACE/unbound"
+          $uri = "$env:TARBALL_URL"
+          curl.exe -L -o unbound.tar.gz "$uri"
+          mkdir "$dest"
+          tar.exe -xzf unbound.tar.gz -C "$dest" --strip-components=1
 
-    - name: Download and Extract Latest Unbound Release Source
-      shell: pwsh
-      run: |
-        $LatestTag = "${{ steps.get_latest_release.outputs.release }}"
-        $TarballFileName = "$LatestTag.tar.gz"
-        $DownloadUrl = "https://github.com/NLnetLabs/unbound/archive/refs/tags/$LatestTag.tar.gz"
+      - name: Install winflexbison3
+        run: |
+          choco install winflexbison3 -y
 
-        Write-Host "Downloading Unbound version $LatestTag from $DownloadUrl"
-        Invoke-WebRequest -Uri $DownloadUrl -OutFile unbound-release.tar.gz
-        tar -xzf unbound-release.tar.gz
+      - name: Set environment variables
+        run: |
+          $env:LEX = "win_flex"
+          $env:YACC = "win_bison -y"
+          $env:unboundpath = "$env:GITHUB_WORKSPACE/unbound"
+          $env:prepath = "$env:GITHUB_WORKSPACE"
 
-        $ExtractedFolderName = (Get-ChildItem -Directory -Filter "unbound-*" | Select-Object -First 1).Name
-        if (-not $ExtractedFolderName) {
-          Write-Error "Could not find extracted Unbound folder."
-          exit 1
-        }
-        Move-Item -Path $ExtractedFolderName -Destination "unbound-src"
-        Write-Host "Successfully downloaded and extracted Unbound to $(Get-Location)\unbound-src"
+      - name: Build OpenSSL
+        run: |
+          mkdir "$env:prepath/openssl"
+          curl.exe -L -k -o openssl-3.2.0.tar.gz https://www.openssl.org/source/openssl-3.2.0.tar.gz 
+          tar.exe -xzf openssl-3.2.0.tar.gz -C "$env:prepath"
+          cd "$env:prepath/openssl-3.2.0"
+          C:/msys64/usr/bin/perl.exe ./Configure no-shared no-asm -DOPENSSL_NO_CAPIENG mingw64 --prefix="$env:prepath/openssl" PERL="C:/msys64/usr/bin/perl"
+          make.exe build_libs
+          cp Makefile Makefile.orig
+          sed.exe -e "s?^INSTALLTOP=.*$?INSTALLTOP=$env:prepath/openssl?" Makefile.orig > Makefile
+          make.exe install_dev
 
-        $WorkspacePath = (Resolve-Path .).Path
-        $UnixStyleWorkspacePath = $WorkspacePath -replace '\\', '/' -replace '^([A-Za-z]):', '/$1'.ToLower()
-        echo "PREPATH_WINDOWS=$WorkspacePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        echo "PREPATH_UNIX=$UnixStyleWorkspacePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        Write-Host "PREPATH_UNIX (for msys2 bash) = $UnixStyleWorkspacePath"
-        Write-Host "PREPATH_WINDOWS (for powershell/cmd) = $WorkspacePath"
+      - name: Build Expat
+        run: |
+          $LIBEXPAT_FNAME = "expat-2.7.0"
+          $LIBEXPAT_VERSION_DIR = "R_2_7_0"
+          mkdir "$env:prepath/expat"
+          curl.exe -L -k -o "$LIBEXPAT_FNAME.tar.gz" "https://github.com/libexpat/libexpat/releases/download/ $LIBEXPAT_VERSION_DIR/$LIBEXPAT_FNAME.tar.gz"
+          tar.exe -xzf "$LIBEXPAT_FNAME.tar.gz" -C "$env:prepath"
+          cd "$env:prepath/$LIBEXPAT_FNAME"
+          ./configure SHELL=/usr/bin/bash CONFIG_SHELL=/usr/bin/bash --prefix="$env:prepath/expat" --exec-prefix="$env:prepath/expat" --bindir="$env:prepath/expat/bin" --includedir="$env:prepath/expat/include" --mandir="$env:prepath/expat/man" --libdir="$env:prepath/expat/lib"
+          make.exe
+          make.exe install
 
-    - name: Install Build Tools (Chocolatey)
-      shell: bash # or pwsh, choco should be in PATH
-      run: |
-        echo "Installing winflexbison3..."
-        choco install winflexbison3 --no-progress -y
+      - name: Configure and build Unbound
+        working-directory: ${{ env.unboundpath }}
+        shell: bash
+        run: |
+          ./configure --enable-debug --enable-static-exe --disable-flto "--with-ssl=$env:prepath/openssl" "--with-libexpat=$env:prepath/expat" --disable-shared
+          make.exe
+          make.exe test
 
-    - name: Build Dependencies and Unbound (MSYS2 environment)
-      shell: msys2 {0} # Use MSYS2 shell for these build steps
-      env:
-        LEX: "win_flex" # These might need to be win_flex.exe if not found
-        YACC: "win_bison -y"
-        # PREPATH_UNIX and PREPATH_WINDOWS are available from GITHUB_ENV
-      run: |
-        echo "Running in MSYS2 shell. PREPATH_UNIX is: $PREPATH_UNIX"
-
-        echo "Building OpenSSL..."
-        cd "$PREPATH_UNIX"
-        mkdir -p openssl_build_dir
-        cd openssl_build_dir
-        curl -L -k -s -S -o "${{ env.OPENSSL_TARBALL }}" "${{ env.OPENSSL_DOWNLOAD_URL }}"
-        tar xzf "${{ env.OPENSSL_TARBALL }}"
-        cd "${{ env.OPENSSL_DIR_NAME }}"
-
-        OPENSSL_INSTALL_PATH_UNIX="$PREPATH_UNIX/openssl_install"
-        echo "Configuring OpenSSL. Install path: $OPENSSL_INSTALL_PATH_UNIX. Using /usr/bin/perl from MSYS2 PATH."
-        
-        # Within msys2 shell, /usr/bin/perl should be the MSYS2 Perl.
-        # Ensure paths for --prefix and --openssldir are Unix-style for the MSYS2 environment.
-        /usr/bin/perl ./Configure no-shared no-asm -DOPENSSL_NO_CAPIENG mingw64 \
-            --prefix="$OPENSSL_INSTALL_PATH_UNIX" \
-            --openssldir="$OPENSSL_INSTALL_PATH_UNIX" \
-            PERL="/usr/bin/perl"
-
-        echo "Making OpenSSL (build_libs)..."
-        make build_libs
-        echo "Installing OpenSSL (install_dev)..."
-        make install_dev
-
-        echo "Building Expat..."
-        cd "$PREPATH_UNIX"
-        mkdir -p expat_build_dir
-        cd expat_build_dir
-        EXPAT_DOWNLOAD_URL="https://github.com/libexpat/libexpat/releases/download/${{ env.LIBEXPAT_VERSION_TAG_DIR }}/${{ env.LIBEXPAT_DIR_NAME }}.tar.gz"
-        curl -L -k -s -S -o "${{ env.LIBEXPAT_TARBALL }}" "$EXPAT_DOWNLOAD_URL"
-        tar xzf "${{ env.LIBEXPAT_TARBALL }}"
-        cd "${{ env.LIBEXPAT_DIR_NAME }}"
-
-        EXPAT_INSTALL_PATH_UNIX="$PREPATH_UNIX/expat_install"
-        echo "Configuring Expat to install into $EXPAT_INSTALL_PATH_UNIX"
-        # Expat's configure also expects a Unix-like environment
-        ./configure SHELL=/usr/bin/bash CONFIG_SHELL=/usr/bin/bash \
-            --prefix="$EXPAT_INSTALL_PATH_UNIX" \
-            --exec-prefix="$EXPAT_INSTALL_PATH_UNIX" \
-            --bindir="$EXPAT_INSTALL_PATH_UNIX/bin" \
-            --includedir="$EXPAT_INSTALL_PATH_UNIX/include" \
-            --mandir="$EXPAT_INSTALL_PATH_UNIX/man" \
-            --libdir="$EXPAT_INSTALL_PATH_UNIX/lib"
-
-        echo "Fixing Expat Makefiles (SHELL -> SHELLZZ)..."
-        find . -name "Makefile" -exec sed -i 's/^SHELL\s*=/SHELLZZ =/g' {} \;
-
-        echo "Making Expat..."
-        make
-        echo "Installing Expat..."
-        make install
-
-        echo "Configuring Unbound from $PREPATH_UNIX/unbound-src..."
-        cd "$PREPATH_UNIX/unbound-src"
-
-        OPENSSL_INSTALL_PATH_UNIX_FOR_UNBOUND="$PREPATH_UNIX/openssl_install"
-        EXPAT_INSTALL_PATH_UNIX_FOR_UNBOUND="$PREPATH_UNIX/expat_install"
-
-        echo "Using OpenSSL from: $OPENSSL_INSTALL_PATH_UNIX_FOR_UNBOUND"
-        echo "Using Expat from: $EXPAT_INSTALL_PATH_UNIX_FOR_UNBOUND"
-
-        # Ensure LEX and YACC point to the correct executables.
-        # The choco package winflexbison3 installs them as win_flex.exe and win_bison.exe
-        # These might need to be on the MSYS2 path or called with .exe
-        # Let's try with explicit .exe for LEX and YACC
-        # Or ensure C:\ProgramData\chocolatey\bin is in MSYS2's $PATH (it usually is)
-        ./configure LEX="win_flex.exe" YACC="win_bison.exe -y" \
-            --enable-debug --enable-static-exe --disable-flto \
-            "--with-ssl=$OPENSSL_INSTALL_PATH_UNIX_FOR_UNBOUND" \
-            "--with-libexpat=$EXPAT_INSTALL_PATH_UNIX_FOR_UNBOUND" \
-            --disable-shared
-
-        echo "Making Unbound..."
-        make
-
-        echo "Running Unbound tests (optional)..."
-        make test
-
-    - name: Prepare Artifacts
-      shell: pwsh 
-        # PREPATH_WINDOWS is used here
-      run: |
-        New-Item -ItemType Directory -Force -Path staging
-        $SourceDir = Join-Path $env:PREPATH_WINDOWS "unbound-src"
-        Write-Host "Looking for binaries in $SourceDir"
-
-        Copy-Item -Path (Join-Path $SourceDir "unbound.exe") -Destination "./staging/" -ErrorAction SilentlyContinue
-        Copy-Item -Path (Join-Path $SourceDir "unbound-checkconf.exe") -Destination "./staging/" -ErrorAction SilentlyContinue
-        Copy-Item -Path (Join-Path $SourceDir "unbound-anchor.exe") -Destination "./staging/" -ErrorAction SilentlyContinue
-        
-        if (Test-Path (Join-Path $SourceDir "LICENSE")) { Copy-Item (Join-Path $SourceDir "LICENSE") -Destination "./staging/" }
-        if (Test-Path (Join-Path $SourceDir "doc/example.conf")) { Copy-Item (Join-Path $SourceDir "doc/example.conf") -Destination "./staging/" }
-
-        Write-Host "Staging directory content:"
-        Get-ChildItem ./staging
-
-    - name: Upload Build Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: unbound-windows-${{ steps.get_latest_release.outputs.release }}
-        path: staging/
-        if-no-files-found: error
+      - name: Archive binaries
+        uses: actions/upload-artifact@v3
+        with:
+          name: unbound-windows
+          path: ${{ env.unboundpath }}/util/*.exe
